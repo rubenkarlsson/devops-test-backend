@@ -1,0 +1,12 @@
+services:
+  nestjs-prod:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: nestjs-prod
+    ports:
+      - '3000:3000'
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped

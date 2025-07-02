@@ -17,7 +17,11 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "docker:build:dev": "docker build -f docker/Dockerfile --target development -t nestjs-app:dev .",
+    "docker:build:prod": "docker build -f docker/Dockerfile --target production -t nestjs-app:prod .",
+    "docker:dev": "docker-compose -f docker/docker-compose.dev.yml up --build",
+    "docker:prod": "docker-compose -f docker/docker-compose.prod.yml up --build"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

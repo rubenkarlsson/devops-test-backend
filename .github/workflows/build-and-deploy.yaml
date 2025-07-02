@@ -1,0 +1,168 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: DEV
+    # Only run on push to main (when PR is merged)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      new-release-published: ${{ steps.release.outputs.released }}
+      new-release-version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install release-it
+        run: npm install --save-dev release-it @release-it/conventional-changelog
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run release-it
+        id: release
+        run: |
+          if npx release-it --ci --dry-run | grep -q "No changes"; then
+            echo "released=false" >> $GITHUB_OUTPUT
+            echo "version=" >> $GITHUB_OUTPUT
+          else
+            output=$(npx release-it --ci)
+            echo "released=true" >> $GITHUB_OUTPUT
+            version=$(npm pkg get version | tr -d '"')
+            echo "version=$version" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    environment: DEV
+    needs: release
+    # Only build if there was a new release
+    if: needs.release.outputs.new-release-published == 'true'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.new-release-version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.new-release-version }}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    runs-on: ubuntu-latest
+    environment: DEV
+    needs: [release, build-and-push]
+    # Only deploy if there was a new release and successful build
+    if: needs.release.outputs.new-release-published == 'true' && needs.build-and-push.result == 'success'
+
+    steps:
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Log in to GitHub Container Registry
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Stop and remove existing container if it exists
+            docker stop nestjs-app || true
+            docker rm nestjs-app || true
+
+            # Pull the latest image
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.release.outputs.new-release-version }}
+
+            # Run the new container
+            docker run -d \
+              --name nestjs-app \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              -e NODE_ENV=production \
+              ghcr.io/${{ github.repository }}:${{ needs.release.outputs.new-release-version }}
+
+            # Clean up old images (keep last 3)
+            docker image prune -af --filter "until=72h"
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Wait a moment for the container to start
+            sleep 10
+
+            # Check if container is running
+            if docker ps | grep -q nestjs-app; then
+              echo "✅ Container is running"
+              # Optional: Health check
+              # curl -f http://localhost:3000/health || exit 1
+            else
+              echo "❌ Container failed to start"
+              docker logs nestjs-app
+              exit 1
+            fi
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "🚀 Successfully deployed version ${{ needs.release.outputs.new-release-version }} to ${{ vars.SSH_HOST }}"
+          echo "📦 Docker image: ghcr.io/${{ github.repository }}:${{ needs.release.outputs.new-release-version }}"

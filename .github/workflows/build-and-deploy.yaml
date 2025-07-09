@@ -32,9 +32,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install release-it
-        run: npm install --save-dev release-it @release-it/conventional-changelog
-
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
@@ -89,6 +86,8 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}},value=${{ needs.release.outputs.new-release-version }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.new-release-version }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.new-release-version }}
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix={{branch}}-
 
       - name: Build and push Docker image
